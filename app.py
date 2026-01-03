@@ -1,101 +1,95 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import os
 from datetime import datetime
 
-# --- FILE PATHS FOR SYNOLOGY PERSISTENCE ---
-# These files will stay on your NAS drive even if the app restarts
-PORTFOLIO_FILE = "moore_portfolio.csv"
-LEDGER_FILE = "moore_tax_ledger.csv"
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Smith Maneuver Command Center", page_icon="🛡️", layout="wide")
 
-# --- DEFAULT STATE ---
-DEFAULT_PORTFOLIO = {'PEY.TO': 1814, 'RS.TO': 2218, 'DFN.TO': 2703, 'HHIC.TO': 1510}
-LOAN_AMOUNT = 102582.18
-HELOC_RATE = 0.0445  # 4.45%
-
-# --- PERSISTENCE LOGIC: LOADING DATA ---
-def load_data():
-    if os.path.exists(PORTFOLIO_FILE):
-        return pd.read_csv(PORTFOLIO_FILE).set_index('Asset')['Shares'].to_dict()
-    return DEFAULT_PORTFOLIO
-
-def load_ledger():
-    if os.path.exists(LEDGER_FILE):
-        return pd.read_csv(LEDGER_FILE).to_dict('records')
-    return []
-
-# Initialize state
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = load_data()
-if 'tax_ledger' not in st.session_state:
-    st.session_state.tax_ledger = load_ledger()
-
-st.set_page_config(page_title="Moore Command Center", layout="wide")
-
-# --- SIDEBAR: MANAGE ASSETS & LOG TAXES ---
-with st.sidebar:
-    st.header("🛒 Manage Holdings")
-    ticker = st.selectbox("Asset", list(st.session_state.portfolio.keys()))
-    new_shares = st.number_input("Shares", value=st.session_state.portfolio[ticker])
-    
-    if st.button("Update and Save to NAS"):
-        st.session_state.portfolio[ticker] = new_shares
-        # Save to CSV on Synology
-        pd.DataFrame(list(st.session_state.portfolio.items()), columns=['Asset', 'Shares']).to_csv(PORTFOLIO_FILE, index=False)
-        st.success("Saved to Disk!")
-
-    st.divider()
-    st.header("📝 Log Mortgage Payment")
-    pay_date = st.date_input("Date", datetime.now())
-    pay_amt = st.number_input("Amount ($)", value=998.0)
-    
-    if st.button("Log & Secure Trail"):
-        new_entry = {"Date": pay_date, "Amount": pay_amt, "Type": "Dividend Payment"}
-        st.session_state.tax_ledger.append(new_entry)
-        # Append to Ledger CSV on Synology
-        pd.DataFrame(st.session_state.tax_ledger).to_csv(LEDGER_FILE, index=False)
-        st.toast("CRA Trail Updated!")
-
-# --- MAIN DASHBOARD: REAL-TIME RISK ---
 st.title("🛡️ Smith Maneuver Command Center")
 
-@st.cache_data(ttl=300) # Refresh data every 5 mins
-def fetch_prices(tickers):
-    return {t: yf.Ticker(t).history(period="1d")['Close'].iloc[-1] for t in tickers}
+# --- INITIALIZE DATA ---
+# This ensures the app doesn't crash on the first run
+if 'portfolio' not in st.session_state:
+    # Feel free to change these default Canadian tickers
+    st.session_state.portfolio = {
+        "RY.TO": {"shares": 10, "cost": 120.00},
+        "TD.TO": {"shares": 15, "cost": 85.00},
+        "XIC.TO": {"shares": 50, "cost": 32.00}
+    }
 
-prices = fetch_prices(list(st.session_state.portfolio.keys()))
-total_val = sum(prices[t] * st.session_state.portfolio[t] for t in st.session_state.portfolio)
+# --- FUNCTIONS ---
+@st.cache_data(ttl=3600)  # Refresh prices every hour
+def get_live_prices(tickers):
+    prices = {}
+    for ticker in tickers:
+        try:
+            data = yf.Ticker(ticker).history(period="1d")
+            if not data.empty:
+                prices[ticker] = data['Close'].iloc[-1]
+            else:
+                prices[ticker] = 0.0
+        except Exception:
+            prices[ticker] = 0.0
+    return prices
 
-# Top Level Metrics
-m1, m2, m3 = st.columns(3)
-m1.metric("Portfolio Value", f"${total_val:,.2f}")
-m2.metric("Net Equity", f"${total_val - LOAN_AMOUNT:,.2f}")
-m3.metric("Annual Tax Deduction", f"${(LOAN_AMOUNT * HELOC_RATE):,.2f}")
+# --- SIDEBAR: MANAGE PORTFOLIO ---
+st.sidebar.header("Manage Portfolio")
+new_ticker = st.sidebar.text_input("Add Ticker (e.g., VDY.TO)").upper()
+new_shares = st.sidebar.number_input("Shares", min_value=0.0, step=1.0)
+new_cost = st.sidebar.number_input("Avg Cost ($)", min_value=0.0, step=0.01)
 
-# --- SELL SIGNALS ---
-st.subheader("⚠️ Smart Signals")
-s1, s2 = st.columns(2)
+if st.sidebar.button("Add/Update Stock"):
+    if new_ticker:
+        st.session_state.portfolio[new_ticker] = {"shares": new_shares, "cost": new_cost}
+        st.success(f"Updated {new_ticker}")
+        st.rerun()
 
-with s1:
-    st.write("**Price Cues**")
-    if prices['PEY.TO'] > 26.00:
-        st.success(f"PEY Target Hit! Price: ${prices['PEY.TO']:.2f}. Consider harvesting gains.")
-    if prices['DFN.TO'] < 7.40:
-        st.error(f"DFN Risk! Price: ${prices['DFN.TO']:.2f}. NAV threshold danger.")
+# --- MAIN DASHBOARD ---
+tickers = list(st.session_state.portfolio.keys())
+current_prices = get_live_prices(tickers)
 
-with s2:
-    st.write("**Strategy Health**")
-    est_income = total_val * 0.11 # 11% average
-    if est_income < (LOAN_AMOUNT * HELOC_RATE):
-        st.error("DANGER: Interest cost is outrunning dividends.")
-    else:
-        st.info(f"Healthy: Income exceeds interest by approx. ${est_income/12 - (LOAN_AMOUNT*HELOC_RATE/12):.2f}/mo")
+# Build Dataframe for display
+table_data = []
+total_market_value = 0.0
+total_cost = 0.0
 
-# --- HISTORICAL TAX LEDGER ---
+for t in tickers:
+    shares = st.session_state.portfolio[t]['shares']
+    avg_cost = st.session_state.portfolio[t]['cost']
+    current_price = current_prices.get(t, 0.0)
+    
+    mkt_val = shares * current_price
+    cost_basis = shares * avg_cost
+    gain_loss = mkt_val - cost_basis
+    
+    total_market_value += mkt_val
+    total_cost += cost_basis
+    
+    table_data.append({
+        "Ticker": t,
+        "Shares": shares,
+        "Avg Cost": f"${avg_cost:.2f}",
+        "Current Price": f"${current_price:.2f}",
+        "Market Value": f"${mkt_val:.2f}",
+        "Gain/Loss": f"${gain_loss:.2f}"
+    })
+
+df = pd.DataFrame(table_data)
+
+# Display Metrics
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Market Value", f"${total_market_value:,.2f}")
+col2.metric("Total Cost Basis", f"${total_cost:,.2f}")
+total_gain = total_market_value - total_cost
+col3.metric("Total Profit/Loss", f"${total_gain:,.2f}", delta=f"{total_gain:,.2f}")
+
 st.divider()
-st.subheader("📅 Tax Ledger & Audit Trail")
-if st.session_state.tax_ledger:
-    st.dataframe(pd.DataFrame(st.session_state.tax_ledger), use_container_width=True)
+
+# Show the Table
+if not df.empty:
+    st.dataframe(df, use_container_width=True)
 else:
-    st.info("No payments logged. Your ledger will appear here once you log your first mortgage prepayment.")
+    st.write("Your portfolio is currently empty. Add a ticker in the sidebar!")
+
+st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
